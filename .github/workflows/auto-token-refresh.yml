@@ -129,6 +129,7 @@ jobs:
       - name: Create or update GitHub issue for token renewal
         if: steps.check-token.outputs.needs_action == 'true' && steps.check-issues.outputs.issues_enabled == 'true'
         id: create-issue
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           script: |
@@ -244,7 +245,7 @@ jobs:
             }
 
       - name: Send workflow summary (alternative to GitHub Issues)
-        if: steps.check-token.outputs.needs_action == 'true' && (steps.check-issues.outputs.issues_enabled != 'true' || steps.create-issue.outcome == 'failure')
+        if: steps.check-token.outputs.needs_action == 'true'
         run: |
           echo "## 🔑 Claude OAuth Token Renewal Alert" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -261,6 +262,10 @@ jobs:
             echo "- ⚠️ GitHub Issues: **DISABLED** for this repository" >> $GITHUB_STEP_SUMMARY
           elif [ "${{ steps.check-issues.outputs.issues_enabled }}" = "error" ]; then
             echo "- ❌ GitHub Issues: **ERROR** - ${{ steps.check-issues.outputs.issue_error }}" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.create-issue.outcome }}" = "failure" ]; then
+            echo "- ❌ GitHub Issues: **FAILED** - Unable to create/update issue" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.create-issue.outcome }}" = "success" ]; then
+            echo "- ✅ GitHub Issues: **SUCCESS** - Issue created/updated" >> $GITHUB_STEP_SUMMARY
           else
             echo "- ❓ GitHub Issues: **UNKNOWN STATUS**" >> $GITHUB_STEP_SUMMARY
           fi
