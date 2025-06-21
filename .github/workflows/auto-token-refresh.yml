@@ -1,0 +1,178 @@
+name: Auto Claude OAuth Token Refresh
+
+on:
+  schedule:
+    # 毎日午前6時（UTC）に自動でトークンを更新
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: 'Force token refresh even if not expired'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  refresh-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Install dependencies
+        run: |
+          npm install
+          
+      - name: Check if refresh is needed
+        id: check-refresh
+        run: |
+          node -e "
+          const expiresAt = '${{ secrets.CLAUDE_EXPIRES_AT }}';
+          const forceRefresh = '${{ github.event.inputs.force_refresh }}' === 'true';
+          const now = Date.now();
+          const expiryTime = parseInt(expiresAt);
+          const hoursLeft = Math.floor((expiryTime - now) / (1000 * 60 * 60));
+          
+          console.log('Current time:', new Date(now).toISOString());
+          console.log('Token expires at:', new Date(expiryTime).toISOString());
+          console.log('Hours until expiry:', hoursLeft);
+          console.log('Force refresh:', forceRefresh);
+          
+          if (forceRefresh || hoursLeft <= 6) {
+            console.log('Token refresh needed');
+            console.log('::set-output name=should_refresh::true');
+          } else {
+            console.log('Token refresh not needed');
+            console.log('::set-output name=should_refresh::false');
+          }
+          "
+          
+      - name: Refresh OAuth Token
+        if: steps.check-refresh.outputs.should_refresh == 'true'
+        id: refresh-token
+        run: |
+          node -e "
+          const https = require('https');
+          
+          const refreshToken = '${{ secrets.CLAUDE_REFRESH_TOKEN }}';
+          
+          if (!refreshToken) {
+            console.error('CLAUDE_REFRESH_TOKEN not found');
+            process.exit(1);
+          }
+          
+          const postData = JSON.stringify({
+            refresh_token: refreshToken
+          });
+          
+          const options = {
+            hostname: 'claude.ai',
+            port: 443,
+            path: '/api/auth/refresh',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(postData),
+              'User-Agent': 'Claude-GitHub-Action/1.0'
+            }
+          };
+          
+          const req = https.request(options, (res) => {
+            let data = '';
+            
+            res.on('data', (chunk) => {
+              data += chunk;
+            });
+            
+            res.on('end', () => {
+              try {
+                const response = JSON.parse(data);
+                
+                if (res.statusCode === 200 && response.access_token) {
+                  console.log('Token refresh successful');
+                  console.log('::set-output name=new_access_token::' + response.access_token);
+                  console.log('::set-output name=new_refresh_token::' + (response.refresh_token || refreshToken));
+                  console.log('::set-output name=new_expires_at::' + (Date.now() + (response.expires_in || 86400) * 1000));
+                  console.log('::set-output name=success::true');
+                } else {
+                  console.error('Token refresh failed:', data);
+                  console.log('::set-output name=success::false');
+                  process.exit(1);
+                }
+              } catch (error) {
+                console.error('Failed to parse response:', error);
+                console.log('::set-output name=success::false');
+                process.exit(1);
+              }
+            });
+          });
+          
+          req.on('error', (error) => {
+            console.error('Request failed:', error);
+            console.log('::set-output name=success::false');
+            process.exit(1);
+          });
+          
+          req.write(postData);
+          req.end();
+          "
+          
+      - name: Update GitHub Secrets
+        if: steps.refresh-token.outputs.success == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_ACCESS_TOKEN: ${{ steps.refresh-token.outputs.new_access_token }}
+          NEW_REFRESH_TOKEN: ${{ steps.refresh-token.outputs.new_refresh_token }}
+          NEW_EXPIRES_AT: ${{ steps.refresh-token.outputs.new_expires_at }}
+        run: |
+          # GitHub CLIを使用してSecretsを更新
+          echo "$NEW_ACCESS_TOKEN" | gh secret set CLAUDE_ACCESS_TOKEN --repo ${{ github.repository }}
+          echo "$NEW_REFRESH_TOKEN" | gh secret set CLAUDE_REFRESH_TOKEN --repo ${{ github.repository }}
+          echo "$NEW_EXPIRES_AT" | gh secret set CLAUDE_EXPIRES_AT --repo ${{ github.repository }}
+          
+          echo "GitHub Secrets updated successfully"
+          
+      - name: Close existing token refresh issues
+        if: steps.refresh-token.outputs.success == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Close any open token refresh issues
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['claude-oauth-token']
+            });
+            
+            for (const issue of issues.data) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed'
+              });
+              
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: '✅ Token has been automatically refreshed. This issue is now resolved.'
+              });
+            }
+            
+      - name: Send success notification
+        if: steps.refresh-token.outputs.success == 'true'
+        run: |
+          if [ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"✅ Claude OAuth Token Successfully Refreshed\n\nThe Claude OAuth token has been automatically refreshed and GitHub Secrets have been updated.\n\nRepository: ${{ github.repository }}"}' \
+              ${{ secrets.SLACK_WEBHOOK_URL }}
+          else
+            echo "Token refresh completed successfully"
+          fi 
