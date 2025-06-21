@@ -59,44 +59,50 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const title = 'Claude OAuth Token Refresh Required';
-            const body = `
-            ## Claude OAuth Token Refresh Required
-            
-            The Claude OAuth token is expiring soon and needs to be refreshed.
-            
-            ### Action Required:
-            1. Run the token refresh script: \`scripts/refresh-oauth-token.js\`
-            2. Update the following GitHub Secrets with the new values:
-               - \`CLAUDE_ACCESS_TOKEN\`
-               - \`CLAUDE_REFRESH_TOKEN\`
-               - \`CLAUDE_EXPIRES_AT\`
-            
-            ### Automatic Refresh:
-            You can also trigger the automatic refresh workflow manually from the Actions tab.
-            
-            **This issue was created automatically by the token check workflow.**
-            `;
-            
-            // Check if issue already exists
-            const existingIssues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: ['claude-oauth-token']
-            });
-            
-            if (existingIssues.data.length === 0) {
-              await github.rest.issues.create({
+            try {
+              const title = 'Claude OAuth Token Refresh Required';
+              const body = `
+              ## Claude OAuth Token Refresh Required
+              
+              The Claude OAuth token is expiring soon and needs to be refreshed.
+              
+              ### Action Required:
+              1. Run the token refresh script: \`scripts/refresh-oauth-token.js\`
+              2. Update the following GitHub Secrets with the new values:
+                 - \`CLAUDE_ACCESS_TOKEN\`
+                 - \`CLAUDE_REFRESH_TOKEN\`
+                 - \`CLAUDE_EXPIRES_AT\`
+              
+              ### Automatic Refresh:
+              You can also trigger the automatic refresh workflow manually from the Actions tab.
+              
+              **This issue was created automatically by the token check workflow.**
+              `;
+              
+              // Check if issue already exists
+              const existingIssues = await github.rest.issues.listForRepo({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                title: title,
-                body: body,
-                labels: ['claude-oauth-token', 'maintenance']
+                state: 'open',
+                labels: ['claude-oauth-token']
               });
-              console.log('Issue created for token refresh');
-            } else {
-              console.log('Issue already exists for token refresh');
+              
+              if (existingIssues.data.length === 0) {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: title,
+                  body: body,
+                  labels: ['claude-oauth-token', 'maintenance']
+                });
+                console.log('Issue created for token refresh');
+              } else {
+                console.log('Issue already exists for token refresh');
+              }
+            } catch (error) {
+              console.log('Warning: Could not create issue (Issues may be disabled for this repository)');
+              console.log('Error:', error.message);
+              console.log('Token refresh is still needed - please check manually or use the auto-refresh workflow');
             }
             
       - name: Send Slack notification (optional)

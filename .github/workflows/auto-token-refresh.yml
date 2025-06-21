@@ -140,27 +140,38 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const issues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: ['claude-oauth-token']
-            });
-            
-            for (const issue of issues.data) {
-              await github.rest.issues.update({
+            try {
+              const issues = await github.rest.issues.listForRepo({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: issue.number,
-                state: 'closed'
+                state: 'open',
+                labels: ['claude-oauth-token']
               });
               
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                body: '✅ Token has been automatically refreshed. This issue is now closed.'
-              });
+              for (const issue of issues.data) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed'
+                });
+                
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: '✅ Token has been automatically refreshed. This issue is now closed.'
+                });
+              }
+              
+              if (issues.data.length > 0) {
+                console.log(`Closed ${issues.data.length} token refresh issue(s)`);
+              } else {
+                console.log('No open token refresh issues found');
+              }
+            } catch (error) {
+              console.log('Warning: Could not close issues (Issues may be disabled for this repository)');
+              console.log('Error:', error.message);
             }
             
       - name: Send success notification
