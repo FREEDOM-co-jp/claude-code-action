@@ -219,9 +219,9 @@ jobs:
             // Try curl as last resort
             console.log('🔧 Trying curl as last resort...');
             
-            const { exec } = require('child_process');
+            const { exec: execCommand } = require('child_process');
             const util = require('util');
-            const execAsync = util.promisify(exec);
+            const execAsync = util.promisify(execCommand);
             
             try {
               const curlCommand = `curl -X POST "https://claude.ai/api/auth/refresh" \
