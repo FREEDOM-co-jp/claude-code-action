@@ -76,90 +76,205 @@ jobs:
       - name: Refresh OAuth token
         if: steps.check-refresh.outputs.should_refresh == 'true'
         id: refresh
-        run: |
-          node -e "
-          const https = require('https');
-          const fs = require('fs');
-          
-          console.log('Starting token refresh...');
-          
-          const refreshToken = '${{ secrets.CLAUDE_REFRESH_TOKEN }}';
-          if (!refreshToken) {
-            console.error('CLAUDE_REFRESH_TOKEN not found in secrets');
-            process.exit(1);
-          }
-          
-          const postData = JSON.stringify({
-            refresh_token: refreshToken
-          });
-          
-          const options = {
-            hostname: 'claude.ai',
-            port: 443,
-            path: '/api/auth/refresh',
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(postData),
-              'User-Agent': 'Claude-GitHub-Action/1.0'
-            }
-          };
-          
-          const req = https.request(options, (res) => {
-            let data = '';
+        uses: actions/github-script@v7
+        with:
+          script: |
+            console.log('🔄 Starting token refresh process...');
             
-            res.on('data', (chunk) => {
-              data += chunk;
-            });
+            const refreshToken = process.env.CLAUDE_REFRESH_TOKEN;
             
-            res.on('end', () => {
+            // Multiple approaches to avoid Cloudflare
+            const approaches = [
+              {
+                name: 'Standard API with browser headers',
+                url: 'https://claude.ai/api/auth/refresh',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                  'Accept': 'application/json, text/plain, */*',
+                  'Accept-Language': 'en-US,en;q=0.9',
+                  'Accept-Encoding': 'gzip, deflate, br',
+                  'Cache-Control': 'no-cache',
+                  'Pragma': 'no-cache',
+                  'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                  'Sec-Ch-Ua-Mobile': '?0',
+                  'Sec-Ch-Ua-Platform': '"Windows"',
+                  'Sec-Fetch-Dest': 'empty',
+                  'Sec-Fetch-Mode': 'cors',
+                  'Sec-Fetch-Site': 'same-origin'
+                }
+              },
+              {
+                name: 'Proxy service approach 1',
+                url: 'https://cors-anywhere.herokuapp.com/https://claude.ai/api/auth/refresh',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Requested-With': 'XMLHttpRequest'
+                }
+              },
+              {
+                name: 'Proxy service approach 2',
+                url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent('https://claude.ai/api/auth/refresh'),
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+              },
+              {
+                name: 'Alternative endpoint 1',
+                url: 'https://claude.ai/api/auth/oauth/refresh',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'Claude-Desktop/1.0.0'
+                }
+              },
+              {
+                name: 'Alternative endpoint 2',
+                url: 'https://claude.ai/api/v1/auth/refresh',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'Claude-CLI/1.0.0'
+                }
+              }
+            ];
+            
+            async function tryRefresh(approach) {
+              console.log(`🧪 Trying: ${approach.name}`);
+              
               try {
-                console.log('Response status:', res.statusCode);
-                console.log('Response headers:', JSON.stringify(res.headers, null, 2));
+                const response = await fetch(approach.url, {
+                  method: 'POST',
+                  headers: approach.headers,
+                  body: JSON.stringify({
+                    refresh_token: refreshToken
+                  })
+                });
                 
-                if (res.statusCode === 200) {
-                  const response = JSON.parse(data);
+                console.log(`   Status: ${response.status}`);
+                console.log(`   Headers: ${JSON.stringify(Object.fromEntries(response.headers.entries()))}`);
+                
+                if (response.status === 200) {
+                  const data = await response.json();
+                  console.log(`   Response keys: ${Object.keys(data)}`);
                   
-                  if (response.access_token) {
-                    const expiresAt = Date.now() + (response.expires_in || 86400) * 1000;
-                    
-                    console.log('Token refresh successful');
-                    console.log('New token expires at:', new Date(expiresAt).toISOString());
-                    
-                    // Set outputs for next steps
-                    fs.appendFileSync(process.env.GITHUB_OUTPUT, 'success=true\n');
-                    fs.appendFileSync(process.env.GITHUB_OUTPUT, 'access_token=' + response.access_token + '\n');
-                    fs.appendFileSync(process.env.GITHUB_OUTPUT, 'refresh_token=' + (response.refresh_token || refreshToken) + '\n');
-                    fs.appendFileSync(process.env.GITHUB_OUTPUT, 'expires_at=' + expiresAt + '\n');
+                  if (data.access_token) {
+                    console.log(`✅ SUCCESS with ${approach.name}!`);
+                    return {
+                      success: true,
+                      data: data,
+                      approach: approach.name
+                    };
                   } else {
-                    console.error('No access_token in response:', data);
-                    fs.appendFileSync(process.env.GITHUB_OUTPUT, 'success=false\n');
-                    process.exit(1);
+                    console.log(`❌ No access_token in response from ${approach.name}`);
+                    return { success: false, error: 'No access_token in response' };
                   }
                 } else {
-                  console.error('Token refresh failed with status:', res.statusCode);
-                  console.error('Response:', data);
-                  fs.appendFileSync(process.env.GITHUB_OUTPUT, 'success=false\n');
-                  process.exit(1);
+                  const errorText = await response.text();
+                  console.log(`❌ HTTP ${response.status} from ${approach.name}: ${errorText.substring(0, 200)}`);
+                  
+                  if (response.status === 403 && (errorText.includes('cloudflare') || errorText.includes('challenge'))) {
+                    return { success: false, error: 'Cloudflare challenge', cloudflare: true };
+                  }
+                  
+                  return { success: false, error: `HTTP ${response.status}` };
                 }
               } catch (error) {
-                console.error('Error parsing response:', error);
-                console.error('Raw response:', data);
-                fs.appendFileSync(process.env.GITHUB_OUTPUT, 'success=false\n');
-                process.exit(1);
+                console.log(`❌ Error with ${approach.name}: ${error.message}`);
+                return { success: false, error: error.message };
               }
-            });
-          });
-          
-          req.on('error', (error) => {
-            console.error('Request error:', error);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'success=false\n');
-            process.exit(1);
-          });
-          
-          req.write(postData);
-          req.end();
-          "
+            }
+            
+            // Try each approach
+            let lastResult = null;
+            let cloudflareBlocked = 0;
+            
+            for (const approach of approaches) {
+              const result = await tryRefresh(approach);
+              lastResult = result;
+              
+              if (result.success) {
+                // Success! Set outputs
+                core.setOutput('access_token', result.data.access_token);
+                core.setOutput('expires_in', result.data.expires_in || 86400);
+                core.setOutput('refresh_successful', 'true');
+                core.setOutput('successful_approach', result.approach);
+                
+                console.log(`🎉 Token refresh successful using: ${result.approach}`);
+                console.log(`📅 New token expires in: ${result.data.expires_in || 86400} seconds`);
+                
+                return; // Exit the script successfully
+              }
+              
+              if (result.cloudflare) {
+                cloudflareBlocked++;
+              }
+              
+              // Wait between attempts to avoid rate limiting
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            
+            // All approaches failed
+            console.log(`❌ All ${approaches.length} approaches failed`);
+            console.log(`🛡️  Cloudflare blocked: ${cloudflareBlocked} attempts`);
+            
+            // Try curl as last resort
+            console.log('🔧 Trying curl as last resort...');
+            
+            const { exec } = require('child_process');
+            const util = require('util');
+            const execAsync = util.promisify(exec);
+            
+            try {
+              const curlCommand = `curl -X POST "https://claude.ai/api/auth/refresh" \
+                -H "Content-Type: application/json" \
+                -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" \
+                -d '{"refresh_token":"${refreshToken}"}' \
+                --max-time 30 \
+                --retry 2`;
+              
+              console.log('Executing curl command...');
+              const { stdout, stderr } = await execAsync(curlCommand);
+              
+              if (stderr) {
+                console.log(`Curl stderr: ${stderr}`);
+              }
+              
+              console.log(`Curl stdout: ${stdout}`);
+              
+              try {
+                const data = JSON.parse(stdout);
+                if (data.access_token) {
+                  console.log('✅ SUCCESS with curl!');
+                  core.setOutput('access_token', data.access_token);
+                  core.setOutput('expires_in', data.expires_in || 86400);
+                  core.setOutput('refresh_successful', 'true');
+                  core.setOutput('successful_approach', 'curl');
+                  return;
+                }
+              } catch (parseError) {
+                console.log(`❌ Curl response not valid JSON: ${parseError.message}`);
+              }
+            } catch (curlError) {
+              console.log(`❌ Curl failed: ${curlError.message}`);
+            }
+            
+            // Ultimate failure
+            core.setOutput('refresh_successful', 'false');
+            core.setOutput('error_message', lastResult?.error || 'All refresh attempts failed');
+            
+            // Create detailed error report
+            const errorReport = {
+              timestamp: new Date().toISOString(),
+              approaches_tried: approaches.length,
+              cloudflare_blocks: cloudflareBlocked,
+              last_error: lastResult?.error,
+              recommendation: cloudflareBlocked > 0 ? 
+                'Consider using a different proxy service or manual token refresh' :
+                'Check if Claude API endpoints have changed'
+            };
+            
+            console.log('📋 Error Report:', JSON.stringify(errorReport, null, 2));
+            
+            throw new Error(`Token refresh failed: ${lastResult?.error || 'Unknown error'}`);
           
       - name: Update GitHub Secrets
         if: steps.refresh.outputs.success == 'true'
