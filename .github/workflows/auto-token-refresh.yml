@@ -65,74 +65,20 @@ jobs:
           console.log('=== End Token Refresh Check ===');
           "
           
+      - name: Debug refresh decision
+        run: |
+          echo "=== Debug Information ==="
+          echo "should_refresh output: '${{ steps.check-refresh.outputs.should_refresh }}'"
+          echo "Condition check: steps.check-refresh.outputs.should_refresh == 'true'"
+          echo "Condition result: ${{ steps.check-refresh.outputs.should_refresh == 'true' }}"
+          echo "========================="
+          
       - name: Refresh OAuth token
-        if: steps.check-refresh.outputs.should_refresh == 'true'
+        if: false  # 一時的に無効化してデバッグ
         id: refresh
         run: |
-          node -e "
-          const fs = require('fs');
-          const https = require('https');
-          
-          const refreshToken = '${{ secrets.CLAUDE_REFRESH_TOKEN }}';
-          
-          const postData = JSON.stringify({
-            grant_type: 'refresh_token',
-            refresh_token: refreshToken
-          });
-          
-          const options = {
-            hostname: 'claude.ai',
-            port: 443,
-            path: '/api/oauth/token',
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(postData)
-            }
-          };
-          
-          const req = https.request(options, (res) => {
-            let data = '';
-            
-            res.on('data', (chunk) => {
-              data += chunk;
-            });
-            
-            res.on('end', () => {
-              try {
-                const response = JSON.parse(data);
-                
-                if (res.statusCode === 200 && response.access_token) {
-                  console.log('Token refresh successful');
-                  
-                  const expiresAt = Date.now() + (response.expires_in * 1000);
-                  
-                  fs.appendFileSync(process.env.GITHUB_OUTPUT, \`access_token=\${response.access_token}\n\`);
-                  fs.appendFileSync(process.env.GITHUB_OUTPUT, \`refresh_token=\${response.refresh_token || refreshToken}\n\`);
-                  fs.appendFileSync(process.env.GITHUB_OUTPUT, \`expires_at=\${expiresAt}\n\`);
-                  fs.appendFileSync(process.env.GITHUB_OUTPUT, 'success=true\n');
-                } else {
-                  console.error('Token refresh failed:', data);
-                  fs.appendFileSync(process.env.GITHUB_OUTPUT, 'success=false\n');
-                  process.exit(1);
-                }
-              } catch (error) {
-                console.error('Failed to parse response:', error);
-                fs.appendFileSync(process.env.GITHUB_OUTPUT, 'success=false\n');
-                process.exit(1);
-              }
-            });
-          });
-          
-          req.on('error', (error) => {
-            console.error('Request failed:', error);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'success=false\n');
-            process.exit(1);
-          });
-          
-          req.write(postData);
-          req.end();
-          "
+          echo "Token refresh step temporarily disabled for debugging"
+          echo "should_refresh output was: ${{ steps.check-refresh.outputs.should_refresh }}"
           
       - name: Update GitHub Secrets
         if: steps.refresh.outputs.success == 'true'
