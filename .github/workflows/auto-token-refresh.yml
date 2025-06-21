@@ -1,19 +1,21 @@
-name: Auto Claude OAuth Token Refresh
+name: Claude OAuth Token Monitor
 
 on:
   schedule:
-    # 毎日午前6時（UTC）にトークンを自動更新
+    # 毎日午前6時（UTC）にトークンの状態をチェック
     - cron: '0 6 * * *'
+    # 毎日午後6時（UTC）にも追加チェック
+    - cron: '0 18 * * *'
   workflow_dispatch:
     inputs:
-      force_refresh:
-        description: 'Force token refresh even if not expired'
+      force_check:
+        description: 'Force token status check'
         required: false
         default: false
         type: boolean
 
 jobs:
-  refresh-token:
+  monitor-token:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -32,397 +34,273 @@ jobs:
         run: |
           npm install
           
-      - name: Check if refresh is needed
-        id: check-refresh
+      - name: Check token status
+        id: check-token
         run: |
           node -e "
           const fs = require('fs');
           const expiresAt = '${{ secrets.CLAUDE_EXPIRES_AT }}';
-          const forceRefresh = '${{ github.event.inputs.force_refresh }}' === 'true';
+          const forceCheck = '${{ github.event.inputs.force_check }}' === 'true';
           const now = Date.now();
           const expiryTime = parseInt(expiresAt);
           const hoursLeft = Math.floor((expiryTime - now) / (1000 * 60 * 60));
+          const daysLeft = Math.floor(hoursLeft / 24);
           
-          console.log('=== Token Refresh Check ===');
+          console.log('=== Claude Token Status Check ===');
           console.log('Current time:', new Date(now).toISOString());
           console.log('Token expires at:', new Date(expiryTime).toISOString());
-          console.log('Expiry timestamp:', expiryTime);
-          console.log('Current timestamp:', now);
           console.log('Hours until expiry:', hoursLeft);
-          console.log('Force refresh input:', '${{ github.event.inputs.force_refresh }}');
-          console.log('Force refresh boolean:', forceRefresh);
-          console.log('Refresh threshold: 6 hours');
+          console.log('Days until expiry:', daysLeft);
+          console.log('Force check:', forceCheck);
           
-          if (hoursLeft <= 6 || forceRefresh) {
-            console.log('✅ Token refresh IS needed');
-            console.log('Reason:', forceRefresh ? 'Force refresh requested' : 'Token expires within 6 hours');
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_refresh=true\n');
-          } else {
-            console.log('❌ Token refresh NOT needed');
-            console.log('Token is still valid for', hoursLeft, 'hours');
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_refresh=false\n');
+          let alertLevel = 'none';
+          let alertMessage = '';
+          let needsAction = false;
+          
+          if (hoursLeft <= 0) {
+            alertLevel = 'critical';
+            alertMessage = '🚨 CRITICAL: Token has EXPIRED!';
+            needsAction = true;
+          } else if (hoursLeft <= 6) {
+            alertLevel = 'urgent';
+            alertMessage = '⚠️ URGENT: Token expires in ' + hoursLeft + ' hours';
+            needsAction = true;
+          } else if (hoursLeft <= 24) {
+            alertLevel = 'warning';
+            alertMessage = '⚠️ WARNING: Token expires in ' + hoursLeft + ' hours (less than 1 day)';
+            needsAction = true;
+          } else if (daysLeft <= 3) {
+            alertLevel = 'notice';
+            alertMessage = '📢 NOTICE: Token expires in ' + daysLeft + ' days';
+            needsAction = true;
+          } else if (forceCheck) {
+            alertLevel = 'info';
+            alertMessage = 'ℹ️ INFO: Token is healthy, expires in ' + daysLeft + ' days';
+            needsAction = false;
           }
-          console.log('=== End Token Refresh Check ===');
+          
+          console.log('Alert level:', alertLevel);
+          console.log('Alert message:', alertMessage);
+          console.log('Needs action:', needsAction);
+          
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'alert_level=' + alertLevel + '\n');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'alert_message=' + alertMessage + '\n');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'needs_action=' + needsAction + '\n');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'hours_left=' + hoursLeft + '\n');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'days_left=' + daysLeft + '\n');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'expires_at=' + new Date(expiryTime).toISOString() + '\n');
+          
+          console.log('=== End Token Status Check ===');
           "
           
-      - name: Debug refresh decision
-        run: |
-          echo "=== Debug Information ==="
-          echo "should_refresh output: '${{ steps.check-refresh.outputs.should_refresh }}'"
-          echo "Condition check: steps.check-refresh.outputs.should_refresh == 'true'"
-          echo "Condition result: ${{ steps.check-refresh.outputs.should_refresh == 'true' }}"
-          echo "========================="
-          
-      - name: Refresh OAuth token
-        if: steps.check-refresh.outputs.should_refresh == 'true'
+      - name: Create or update GitHub issue for token renewal
+        if: steps.check-token.outputs.needs_action == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            console.log('🔄 Starting token refresh process...');
+            const alertLevel = '${{ steps.check-token.outputs.alert_level }}';
+            const alertMessage = '${{ steps.check-token.outputs.alert_message }}';
+            const hoursLeft = '${{ steps.check-token.outputs.hours_left }}';
+            const daysLeft = '${{ steps.check-token.outputs.days_left }}';
+            const expiresAt = '${{ steps.check-token.outputs.expires_at }}';
             
-            const refreshToken = process.env.CLAUDE_REFRESH_TOKEN;
+            // Check for existing open issues
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['claude-oauth-token', 'token-renewal']
+            });
             
-            // Multiple approaches to avoid Cloudflare
-            const approaches = [
-              {
-                name: 'Standard API with browser headers',
-                url: 'https://claude.ai/api/auth/refresh',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                  'Accept': 'application/json, text/plain, */*',
-                  'Accept-Language': 'en-US,en;q=0.9',
-                  'Accept-Encoding': 'gzip, deflate, br',
-                  'Cache-Control': 'no-cache',
-                  'Pragma': 'no-cache',
-                  'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                  'Sec-Ch-Ua-Mobile': '?0',
-                  'Sec-Ch-Ua-Platform': '"Windows"',
-                  'Sec-Fetch-Dest': 'empty',
-                  'Sec-Fetch-Mode': 'cors',
-                  'Sec-Fetch-Site': 'same-origin'
-                }
-              },
-              {
-                name: 'Proxy service - CORS Anywhere',
-                url: 'https://cors-anywhere.herokuapp.com/https://claude.ai/api/auth/refresh',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Requested-With': 'XMLHttpRequest',
-                  'Origin': 'https://cors-anywhere.herokuapp.com'
-                }
-              },
-              {
-                name: 'Proxy service - ThingProxy',
-                url: 'https://thingproxy.freeboard.io/fetch/https://claude.ai/api/auth/refresh',
-                headers: {
-                  'Content-Type': 'application/json'
-                }
-              },
-              {
-                name: 'Proxy service - Proxy.cors.sh (fixed)',
-                url: 'https://proxy.cors.sh/https://claude.ai/api/auth/refresh',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Requested-With': 'XMLHttpRequest',
-                  'Origin': 'https://proxy.cors.sh'
-                }
-              },
-              {
-                name: 'Proxy service - CorsProxy',
-                url: 'https://corsproxy.io/?https://claude.ai/api/auth/refresh',
-                headers: {
-                  'Content-Type': 'application/json'
-                }
-              },
-              {
-                name: 'Proxy service - AllOrigins GET method',
-                url: 'https://api.allorigins.win/get?url=' + encodeURIComponent('https://claude.ai/api/auth/refresh'),
-                method: 'GET',
-                headers: {
-                  'Content-Type': 'application/json'
-                },
-                customBody: true
-              },
-              {
-                name: 'Alternative endpoint 1',
-                url: 'https://claude.ai/api/auth/oauth/refresh',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'User-Agent': 'Claude-Desktop/1.0.0'
-                }
-              },
-              {
-                name: 'Alternative endpoint 2',
-                url: 'https://claude.ai/api/v1/auth/refresh',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'User-Agent': 'Claude-CLI/1.0.0'
-                }
-              }
-            ];
+            const title = `🔑 Claude OAuth Token Renewal Required - ${alertLevel.toUpperCase()}`;
             
-            async function tryRefresh(approach) {
-              console.log(`🧪 Trying: ${approach.name}`);
-              
-              try {
-                const requestOptions = {
-                  method: approach.method || 'POST',
-                  headers: approach.headers
-                };
-                
-                // Handle special cases for proxy services
-                if (approach.customBody) {
-                  // For GET requests that need to send POST data through proxy
-                  const targetUrl = `https://claude.ai/api/auth/refresh`;
-                  const postData = JSON.stringify({refresh_token: refreshToken});
-                  requestOptions.url = approach.url + '&method=POST&headers=' + 
-                    encodeURIComponent(JSON.stringify({'Content-Type': 'application/json'})) +
-                    '&body=' + encodeURIComponent(postData);
-                } else {
-                  requestOptions.body = JSON.stringify({
-                    refresh_token: refreshToken
-                  });
-                }
-                
-                const response = await fetch(approach.url, requestOptions);
-                
-                console.log(`   Status: ${response.status}`);
-                console.log(`   Headers: ${JSON.stringify(Object.fromEntries(response.headers.entries()))}`);
-                
-                if (response.status === 200) {
-                  const responseText = await response.text();
-                  console.log(`   Raw response: ${responseText.substring(0, 300)}${responseText.length > 300 ? '...' : ''}`);
-                  
-                  let data;
-                  try {
-                    // Handle JSONP responses
-                    if (approach.isJsonp && responseText.includes('callback')) {
-                      const jsonMatch = responseText.match(/\{.*\}/);
-                      if (jsonMatch) {
-                        const innerData = JSON.parse(jsonMatch[0]);
-                        if (innerData.contents) {
-                          data = JSON.parse(innerData.contents);
-                        } else {
-                          data = innerData;
-                        }
-                      } else {
-                        throw new Error('JSONP response not parseable');
-                      }
-                    } else {
-                      data = JSON.parse(responseText);
-                    }
-                    
-                    console.log(`   Response keys: ${Object.keys(data)}`);
-                    
-                    // Check for various possible response structures
-                    let accessToken = data.access_token || data.accessToken || data.token;
-                    let expiresIn = data.expires_in || data.expiresIn || data.expiry || 86400;
-                    
-                    // Check nested structures
-                    if (!accessToken && data.data) {
-                      accessToken = data.data.access_token || data.data.accessToken || data.data.token;
-                      expiresIn = data.data.expires_in || data.data.expiresIn || data.data.expiry || expiresIn;
-                    }
-                    
-                    // Check result field (common in proxy responses)
-                    if (!accessToken && data.result) {
-                      accessToken = data.result.access_token || data.result.accessToken || data.result.token;
-                      expiresIn = data.result.expires_in || data.result.expiresIn || data.result.expiry || expiresIn;
-                    }
-                    
-                    // Check contents field (AllOrigins response)
-                    if (!accessToken && data.contents) {
-                      try {
-                        const contentsData = typeof data.contents === 'string' ? JSON.parse(data.contents) : data.contents;
-                        accessToken = contentsData.access_token || contentsData.accessToken || contentsData.token;
-                        expiresIn = contentsData.expires_in || contentsData.expiresIn || contentsData.expiry || expiresIn;
-                      } catch (e) {
-                        console.log(`   Contents parsing failed: ${e.message}`);
-                      }
-                    }
-                    
-                    if (accessToken) {
-                      console.log(`✅ SUCCESS with ${approach.name}!`);
-                      return {
-                        success: true,
-                        data: { access_token: accessToken, expires_in: expiresIn },
-                        approach: approach.name
-                      };
-                    } else {
-                      console.log(`❌ No access_token in response from ${approach.name}`);
-                      console.log(`   Available fields: ${JSON.stringify(data, null, 2)}`);
-                      return { success: false, error: 'No access_token in response' };
-                    }
-                  } catch (parseError) {
-                    console.log(`❌ JSON parse error from ${approach.name}: ${parseError.message}`);
-                    console.log(`   Response was: ${responseText.substring(0, 500)}`);
-                    return { success: false, error: `JSON parse error: ${parseError.message}` };
-                  }
-                } else {
-                  const errorText = await response.text();
-                  console.log(`❌ HTTP ${response.status} from ${approach.name}: ${errorText.substring(0, 200)}`);
-                  
-                  if (response.status === 403 && (errorText.includes('cloudflare') || errorText.includes('challenge'))) {
-                    return { success: false, error: 'Cloudflare challenge', cloudflare: true };
-                  }
-                  
-                  return { success: false, error: `HTTP ${response.status}` };
-                }
-              } catch (error) {
-                console.log(`❌ Error with ${approach.name}: ${error.message}`);
-                return { success: false, error: error.message };
-              }
+            let priorityEmoji = '📢';
+            let urgencyText = 'scheduled renewal';
+            
+            if (alertLevel === 'critical') {
+              priorityEmoji = '🚨';
+              urgencyText = 'IMMEDIATE ACTION REQUIRED';
+            } else if (alertLevel === 'urgent') {
+              priorityEmoji = '⚠️';
+              urgencyText = 'urgent renewal needed';
+            } else if (alertLevel === 'warning') {
+              priorityEmoji = '⚠️';
+              urgencyText = 'renewal needed soon';
             }
             
-            // Try each approach
-            let lastResult = null;
-            let cloudflareBlocked = 0;
+            const body = `${priorityEmoji} **${urgencyText.toUpperCase()}**
             
-            for (const approach of approaches) {
-              const result = await tryRefresh(approach);
-              lastResult = result;
-              
-              if (result.success) {
-                // Success! Set outputs
-                core.setOutput('access_token', result.data.access_token);
-                core.setOutput('expires_in', result.data.expires_in || 86400);
-                core.setOutput('refresh_successful', 'true');
-                core.setOutput('successful_approach', result.approach);
-                
-                console.log(`🎉 Token refresh successful using: ${result.approach}`);
-                console.log(`📅 New token expires in: ${result.data.expires_in || 86400} seconds`);
-                
-                return; // Exit the script successfully
-              }
-              
-              if (result.cloudflare) {
-                cloudflareBlocked++;
-              }
-              
-              // Wait between attempts to avoid rate limiting
-              await new Promise(resolve => setTimeout(resolve, 2000));
-            }
+            ## Token Status
+            - **Current Status**: ${alertMessage}
+            - **Expires At**: ${expiresAt}
+            - **Time Remaining**: ${hoursLeft} hours (${daysLeft} days)
+            - **Alert Level**: ${alertLevel.toUpperCase()}
             
-            // All approaches failed
-            console.log(`❌ All ${approaches.length} approaches failed`);
-            console.log(`🛡️  Cloudflare blocked: ${cloudflareBlocked} attempts`);
+            ## Required Actions
             
-            // Try curl as last resort
-            console.log('🔧 Trying curl as last resort...');
+            ### 1. Manual Token Renewal
+            Since automatic token refresh is currently blocked by Cloudflare, you need to manually update the token:
             
-            const { exec: execCommand } = require('child_process');
-            const util = require('util');
-            const execAsync = util.promisify(execCommand);
+            1. **Login to Claude.ai** in your browser
+            2. **Open Developer Tools** (F12)
+            3. **Go to Application/Storage tab** → Cookies → claude.ai
+            4. **Copy the following values**:
+               - \`sessionKey\` (this is your access token)
+               - \`refresh_token\`
+            5. **Update GitHub Secrets**:
+               - Go to repository Settings → Secrets and variables → Actions
+               - Update \`CLAUDE_ACCESS_TOKEN\` with the sessionKey value
+               - Update \`CLAUDE_REFRESH_TOKEN\` with the refresh_token value
+               - Update \`CLAUDE_EXPIRES_AT\` with new expiration timestamp (current time + 24 hours in milliseconds)
             
-            try {
-              const curlCommand = `curl -X POST "https://claude.ai/api/auth/refresh" \
-                -H "Content-Type: application/json" \
-                -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" \
-                -d '{"refresh_token":"${refreshToken}"}' \
-                --max-time 30 \
-                --retry 2`;
-              
-              console.log('Executing curl command...');
-              const { stdout, stderr } = await execAsync(curlCommand);
-              
-              if (stderr) {
-                console.log(`Curl stderr: ${stderr}`);
-              }
-              
-              console.log(`Curl stdout: ${stdout}`);
-              
-              try {
-                const data = JSON.parse(stdout);
-                if (data.access_token) {
-                  console.log('✅ SUCCESS with curl!');
-                  core.setOutput('access_token', data.access_token);
-                  core.setOutput('expires_in', data.expires_in || 86400);
-                  core.setOutput('refresh_successful', 'true');
-                  core.setOutput('successful_approach', 'curl');
-                  return;
-                }
-              } catch (parseError) {
-                console.log(`❌ Curl response not valid JSON: ${parseError.message}`);
-              }
-            } catch (curlError) {
-              console.log(`❌ Curl failed: ${curlError.message}`);
-            }
+            ### 2. Test the Updated Token
+            Run the following command locally to verify the token works:
+            \`\`\`bash
+            node scripts/test-refresh-endpoints.js
+            \`\`\`
             
-            // Ultimate failure
-            core.setOutput('refresh_successful', 'false');
-            core.setOutput('error_message', lastResult?.error || 'All refresh attempts failed');
+            ### 3. Close This Issue
+            Once you've successfully updated the token, close this issue.
             
-            // Create detailed error report
-            const errorReport = {
-              timestamp: new Date().toISOString(),
-              approaches_tried: approaches.length,
-              cloudflare_blocks: cloudflareBlocked,
-              last_error: lastResult?.error,
-              recommendation: cloudflareBlocked > 0 ? 
-                'Consider using a different proxy service or manual token refresh' : 
-                'Check if Claude API endpoints have changed'
-            };
+            ## Automation Status
+            - ❌ Automatic refresh: **DISABLED** (Cloudflare blocking)
+            - ✅ Monitoring: **ACTIVE**
+            - ✅ Notifications: **ACTIVE**
             
-            console.log('📋 Error Report:', JSON.stringify(errorReport, null, 2));
+            ## Next Steps
+            We're working on alternative solutions for automatic token refresh:
+            - Exploring different proxy services
+            - Considering headless browser automation
+            - Investigating Claude API changes
             
-            throw new Error(`Token refresh failed: ${lastResult?.error || 'Unknown error'}`);
-          
-      - name: Update GitHub Secrets
-        if: steps.refresh.outputs.success == 'true'
-        run: |
-          gh secret set CLAUDE_ACCESS_TOKEN --body "${{ steps.refresh.outputs.access_token }}"
-          gh secret set CLAUDE_REFRESH_TOKEN --body "${{ steps.refresh.outputs.refresh_token }}"
-          gh secret set CLAUDE_EXPIRES_AT --body "${{ steps.refresh.outputs.expires_at }}"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
-      - name: Close existing token refresh issues
-        if: steps.refresh.outputs.success == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            try {
-              const issues = await github.rest.issues.listForRepo({
+            ---
+            *This issue was automatically generated by the Claude Token Monitor workflow.*
+            *Last updated: ${new Date().toISOString()}*`;
+            
+            if (existingIssues.data.length > 0) {
+              // Update existing issue
+              const issue = existingIssues.data[0];
+              await github.rest.issues.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                state: 'open',
-                labels: ['claude-oauth-token']
+                issue_number: issue.number,
+                title: title,
+                body: body,
+                labels: ['claude-oauth-token', 'token-renewal', alertLevel]
               });
               
-              for (const issue of issues.data) {
-                await github.rest.issues.update({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issue.number,
-                  state: 'closed'
-                });
-                
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issue.number,
-                  body: '✅ Token has been automatically refreshed. This issue is now closed.'
-                });
-              }
+              console.log(`Updated existing issue #${issue.number}`);
+            } else {
+              // Create new issue
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['claude-oauth-token', 'token-renewal', alertLevel]
+              });
               
-              if (issues.data.length > 0) {
-                console.log(`Closed ${issues.data.length} token refresh issue(s)`);
-              } else {
-                console.log('No open token refresh issues found');
-              }
-            } catch (error) {
-              console.log('Warning: Could not close issues (Issues may be disabled for this repository)');
-              console.log('Error:', error.message);
+              console.log(`Created new issue #${issue.data.number}`);
             }
             
-      - name: Send success notification
-        if: steps.refresh.outputs.success == 'true'
+      - name: Send Slack notification
+        if: steps.check-token.outputs.needs_action == 'true'
         run: |
           if [ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            ALERT_LEVEL="${{ steps.check-token.outputs.alert_level }}"
+            ALERT_MESSAGE="${{ steps.check-token.outputs.alert_message }}"
+            HOURS_LEFT="${{ steps.check-token.outputs.hours_left }}"
+            EXPIRES_AT="${{ steps.check-token.outputs.expires_at }}"
+            
+            # Set color based on alert level
+            case $ALERT_LEVEL in
+              "critical") COLOR="#FF0000" ;;
+              "urgent") COLOR="#FF6600" ;;
+              "warning") COLOR="#FFAA00" ;;
+              "notice") COLOR="#0099FF" ;;
+              *) COLOR="#808080" ;;
+            esac
+            
             curl -X POST -H 'Content-type: application/json' \
-              --data '{"text":"✅ Claude OAuth Token Refreshed Successfully\n\nThe Claude OAuth token has been automatically refreshed and updated in GitHub Secrets.\n\nRepository: ${{ github.repository }}"}' \
+              --data "{
+                \"attachments\": [{
+                  \"color\": \"$COLOR\",
+                  \"title\": \"🔑 Claude OAuth Token Renewal Required\",
+                  \"text\": \"$ALERT_MESSAGE\",
+                  \"fields\": [
+                    {
+                      \"title\": \"Repository\",
+                      \"value\": \"${{ github.repository }}\",
+                      \"short\": true
+                    },
+                    {
+                      \"title\": \"Time Remaining\",
+                      \"value\": \"$HOURS_LEFT hours\",
+                      \"short\": true
+                    },
+                    {
+                      \"title\": \"Expires At\",
+                      \"value\": \"$EXPIRES_AT\",
+                      \"short\": false
+                    },
+                    {
+                      \"title\": \"Action Required\",
+                      \"value\": \"Manual token renewal needed - check GitHub Issues for instructions\",
+                      \"short\": false
+                    }
+                  ],
+                  \"footer\": \"Claude Token Monitor\",
+                  \"ts\": $(date +%s)
+                }]
+              }" \
               ${{ secrets.SLACK_WEBHOOK_URL }}
           else
-            echo "SLACK_WEBHOOK_URL not configured, skipping notification"
-          fi 
+            echo "SLACK_WEBHOOK_URL not configured, skipping Slack notification"
+          fi
+          
+      - name: Send email notification (if configured)
+        if: steps.check-token.outputs.needs_action == 'true' && steps.check-token.outputs.alert_level == 'critical'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // This would require additional setup with email service
+            console.log('📧 Email notification would be sent here for critical alerts');
+            console.log('Consider setting up with services like SendGrid, AWS SES, etc.');
+            
+      - name: Log monitoring results
+        run: |
+          echo "=== Token Monitoring Results ==="
+          echo "Alert Level: ${{ steps.check-token.outputs.alert_level }}"
+          echo "Alert Message: ${{ steps.check-token.outputs.alert_message }}"
+          echo "Hours Left: ${{ steps.check-token.outputs.hours_left }}"
+          echo "Days Left: ${{ steps.check-token.outputs.days_left }}"
+          echo "Needs Action: ${{ steps.check-token.outputs.needs_action }}"
+          echo "Expires At: ${{ steps.check-token.outputs.expires_at }}"
+          echo "================================"
+          
+      - name: Update monitoring status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Update a status file or database with monitoring results
+            const fs = require('fs');
+            const path = require('path');
+            
+            const monitoringData = {
+              lastCheck: new Date().toISOString(),
+              alertLevel: '${{ steps.check-token.outputs.alert_level }}',
+              hoursLeft: parseInt('${{ steps.check-token.outputs.hours_left }}'),
+              daysLeft: parseInt('${{ steps.check-token.outputs.days_left }}'),
+              expiresAt: '${{ steps.check-token.outputs.expires_at }}',
+              needsAction: '${{ steps.check-token.outputs.needs_action }}' === 'true',
+              repository: context.repo.full_name,
+              workflow: 'claude-token-monitor'
+            };
+            
+            console.log('📊 Monitoring data:', JSON.stringify(monitoringData, null, 2));
+            
+            // In a real implementation, you might want to:
+            // - Store this in a database
+            // - Update a dashboard
+            // - Send to monitoring service
+            // - Create metrics for alerting systems
