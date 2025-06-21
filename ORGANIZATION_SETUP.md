@@ -1,186 +1,182 @@
-# Organization Secrets セットアップガイド
+# Organization Secrets設定ガイド
 
-このガイドでは、20以上のリポジトリでClaude Max OAuth認証を一元管理するためのOrganization Secretsの設定方法を説明します。
+## 🎯 概要
 
-## 🎯 **Organization Secretsの利点**
+このガイドでは、FREEDOM-co-jp Organization全体でClaude OAuth Tokenを一元管理するための設定方法を説明します。
 
-- **一元管理**: 1箇所の更新で全リポジトリに反映
-- **セキュリティ**: 各リポジトリに個別設定する必要がない
-- **効率性**: トークン更新時の作業量を大幅削減
-- **一貫性**: 全リポジトリで同じ認証情報を使用
+## 📋 テスト結果（2025年6月21日）
 
-## 🔧 **初期セットアップ**
+| リポジトリ | 状態 | 備考 |
+|------------|------|------|
+| `claude-code-base-action` | ✅ 成功 | 監視システム正常動作 |
+| `claude-code-action` | ⚠️ 部分成功 | 主要機能は動作、Slack設定要確認 |
 
-### 1. Organization Secretsの作成
+## 🔑 **STEP 1: Organization Secrets設定**
 
-1. **Organization Settings**にアクセス
-   ```
-   https://github.com/organizations/YOUR_ORG_NAME/settings/secrets/actions
-   ```
-
-2. **New organization secret**をクリック
-
-3. 以下の3つのSecretsを作成：
-
-   **CLAUDE_ACCESS_TOKEN**
-   ```
-   Name: CLAUDE_ACCESS_TOKEN
-   Secret: [Claude.aiのsessionKey値]
-   Repository access: Selected repositories (または All repositories)
-   ```
-
-   **CLAUDE_REFRESH_TOKEN**
-   ```
-   Name: CLAUDE_REFRESH_TOKEN
-   Secret: [Claude.aiのrefresh_token値]
-   Repository access: Selected repositories (または All repositories)
-   ```
-
-   **CLAUDE_EXPIRES_AT**
-   ```
-   Name: CLAUDE_EXPIRES_AT
-   Secret: [有効期限のタイムスタンプ（ミリ秒）]
-   Repository access: Selected repositories (または All repositories)
-   ```
-
-### 2. トークン値の取得方法
-
-1. **Claude.ai**にログイン
-2. **開発者ツール**（F12）を開く
-3. **Application** → **Storage** → **Cookies** → **claude.ai**
-4. 以下の値をコピー：
-   - `sessionKey` → `CLAUDE_ACCESS_TOKEN`
-   - `refresh_token` → `CLAUDE_REFRESH_TOKEN`
-
-### 3. 有効期限の計算
-
-ブラウザのコンソールで実行：
-```javascript
-// 現在時刻から24時間後のタイムスタンプを計算
-const expiresAt = Date.now() + (24 * 60 * 60 * 1000);
-console.log('CLAUDE_EXPIRES_AT:', expiresAt);
+### 1.1 Organization設定ページにアクセス
+```
+https://github.com/organizations/FREEDOM-co-jp/settings/secrets/actions
 ```
 
-## 📁 **各リポジトリでの設定**
+### 1.2 必要なSecretsを追加
 
-### ワークフローファイルの配置
+以下の3つのOrganization Secretsを設定してください：
 
-各リポジトリの`.github/workflows/claude.yml`：
+#### **CLAUDE_ACCESS_TOKEN**
+- **説明**: Claude.aiのアクセストークン（sessionKey）
+- **取得方法**: 
+  1. Claude.aiにログイン
+  2. 開発者ツール（F12）を開く
+  3. Application/Storage → Cookies → claude.ai
+  4. `sessionKey` の値をコピー
 
-```yaml
-name: Claude PR Assistant
+#### **CLAUDE_REFRESH_TOKEN**
+- **説明**: トークン更新用のリフレッシュトークン
+- **取得方法**: 
+  1. 同じCookieページで `refresh_token` の値をコピー
 
-on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-  issues:
-    types: [opened, assigned]
+#### **CLAUDE_EXPIRES_AT**
+- **説明**: トークンの有効期限（ミリ秒タイムスタンプ）
+- **計算方法**: 
+  ```javascript
+  // 現在時刻 + 24時間
+  const expiresAt = Date.now() + (24 * 60 * 60 * 1000);
+  console.log(expiresAt); // この値を使用
+  ```
 
-jobs:
-  claude-code-action:
-    if: contains(github.event.comment.body, '@claude') || contains(github.event.issue.body, '@claude')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-      id-token: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+### 1.3 リポジトリアクセス設定
 
-      - name: Run Claude PR Action
-        uses: Akira-Papa/claude-code-action@beta
-        with:
-          use_oauth: "true"
-          # Organization Secretsから自動取得
-          claude_access_token: ${{ secrets.CLAUDE_ACCESS_TOKEN }}
-          claude_refresh_token: ${{ secrets.CLAUDE_REFRESH_TOKEN }}
-          claude_expires_at: ${{ secrets.CLAUDE_EXPIRES_AT }}
-          timeout_minutes: "60"
-```
+各Secretに対して以下のリポジトリへのアクセスを許可：
+- `claude-code-action`
+- `claude-code-base-action`
+- その他のClaude関連リポジトリ（20個以上）
 
-## 🔄 **トークン更新プロセス**
+## 🚀 **STEP 2: 個別リポジトリのSecrets削除**
 
-### 自動監視システム
+Organization Secretsを使用するため、各リポジトリの個別Secretsを削除：
 
-このリポジトリ（claude-code-action）で以下が自動実行されます：
+### 削除対象
+- `CLAUDE_ACCESS_TOKEN`
+- `CLAUDE_REFRESH_TOKEN`
+- `CLAUDE_EXPIRES_AT`
 
-- **毎日6時・18時（UTC）**: トークン有効期限チェック
-- **アラート発生時**: 以下の通知が送信
-  - GitHub Issues（有効な場合）
-  - ワークフローサマリー
-  - Slack通知（設定済みの場合）
-
-### 手動更新手順
-
-アラートを受信したら：
-
-1. **新しいトークンを取得**
-   - Claude.aiにログイン
-   - 開発者ツールでsessionKeyとrefresh_tokenを取得
-
-2. **Organization Secretsを更新**
-   ```
-   https://github.com/organizations/YOUR_ORG_NAME/settings/secrets/actions
-   ```
-   - `CLAUDE_ACCESS_TOKEN`: 新しいsessionKey
-   - `CLAUDE_REFRESH_TOKEN`: 新しいrefresh_token
-   - `CLAUDE_EXPIRES_AT`: 新しい有効期限
-
-3. **即座に全リポジトリに反映**
-   - 個別のリポジトリ設定は不要
-   - 次回のワークフロー実行時から新しいトークンを使用
-
-## 🔍 **監視とトラブルシューティング**
-
-### 監視ワークフローの確認
-
+### 削除手順
 ```bash
-# 最新の監視結果を確認
-gh run list --workflow=auto-token-refresh.yml --repo YOUR_ORG/claude-code-action --limit 5
-
-# 詳細ログを確認
-gh run view RUN_ID --repo YOUR_ORG/claude-code-action
+# 各リポジトリで実行
+gh secret delete CLAUDE_ACCESS_TOKEN --repo FREEDOM-co-jp/[リポジトリ名]
+gh secret delete CLAUDE_REFRESH_TOKEN --repo FREEDOM-co-jp/[リポジトリ名]
+gh secret delete CLAUDE_EXPIRES_AT --repo FREEDOM-co-jp/[リポジトリ名]
 ```
+
+## 📊 **STEP 3: 動作確認**
+
+### 3.1 テスト実行
+```bash
+# 両リポジトリでテスト実行
+gh workflow run auto-token-refresh.yml -f force_check=true --repo FREEDOM-co-jp/claude-code-action
+gh workflow run auto-token-refresh.yml -f force_check=true --repo FREEDOM-co-jp/claude-code-base-action
+```
+
+### 3.2 結果確認
+```bash
+# 実行結果を確認
+gh run list --workflow=auto-token-refresh.yml --repo FREEDOM-co-jp/claude-code-action --limit 1
+gh run list --workflow=auto-token-refresh.yml --repo FREEDOM-co-jp/claude-code-base-action --limit 1
+```
+
+## 🔧 **STEP 4: 追加設定（オプション）**
+
+### 4.1 Slack通知設定
+
+Slack通知を有効にする場合：
+
+#### **SLACK_WEBHOOK_URL** (Organization Secret)
+- **説明**: Slack Incoming Webhook URL
+- **取得方法**: 
+  1. Slackワークスペースの設定
+  2. Apps → Incoming Webhooks
+  3. Webhook URLをコピー
+
+### 4.2 メール通知設定
+
+メール通知を有効にする場合：
+
+#### **EMAIL_SMTP_HOST** (Organization Secret)
+- **説明**: SMTPサーバーホスト
+- **例**: `smtp.gmail.com`
+
+#### **EMAIL_SMTP_USER** (Organization Secret)
+- **説明**: SMTPユーザー名
+
+#### **EMAIL_SMTP_PASS** (Organization Secret)
+- **説明**: SMTPパスワード
+
+#### **EMAIL_TO** (Organization Secret)
+- **説明**: 通知先メールアドレス
+
+## ⏰ **監視スケジュール**
+
+両リポジトリで以下のスケジュールで自動監視：
+- **毎日6:00 UTC** (日本時間15:00)
+- **毎日18:00 UTC** (日本時間3:00)
+
+## 🎯 **アラートレベル**
+
+| レベル | 条件 | アクション |
+|--------|------|-----------|
+| 🚨 CRITICAL | 期限切れ | 即座に更新が必要 |
+| ⚠️ URGENT | 6時間以内 | 緊急更新が必要 |
+| ⚠️ WARNING | 24時間以内 | 更新準備が必要 |
+| 📢 NOTICE | 3日以内 | 更新予定の確認 |
+
+## 🔄 **トークン更新手順**
+
+### 手動更新が必要な場合：
+
+1. **Claude.aiにログイン**
+2. **新しいトークンを取得**（上記STEP 1.2参照）
+3. **Organization Secretsを更新**
+4. **全リポジトリに自動反映**
+
+## ⚠️ **トラブルシューティング**
 
 ### よくある問題
 
-**Q: Organization Secretsが認識されない**
-A: Repository accessの設定を確認してください。対象リポジトリが含まれている必要があります。
+#### 1. "Issues are disabled for this repo"
+- **原因**: GitHubのIssue機能が無効
+- **解決**: Workflow Summaryで通知を確認（正常動作）
 
-**Q: 一部のリポジトリでエラーが発生**
-A: 各リポジトリのワークフローファイルでSecrets名が正しく参照されているか確認してください。
+#### 2. Slack通知失敗
+- **原因**: `SLACK_WEBHOOK_URL`が未設定または無効
+- **解決**: Organization SecretsでWebhook URLを確認・更新
 
-**Q: トークンの有効期限がわからない**
-A: 監視ワークフローを手動実行して現在の状態を確認できます。
+#### 3. トークンが認識されない
+- **原因**: Organization Secretsのアクセス権限不足
+- **解決**: リポジトリアクセス設定を確認
 
-## 📊 **運用のベストプラクティス**
+## 📈 **メリット**
 
-1. **定期的な監視**: アラートを無視せず、速やかに対応
-2. **バックアップ**: 重要な認証情報は安全な場所に保管
-3. **アクセス制御**: Organization Secretsへのアクセス権限を適切に管理
-4. **ログ確認**: 定期的にワークフローログを確認して異常がないかチェック
+### 一元管理の利点
+- ✅ **1回の更新で全リポジトリに反映**
+- ✅ **20個以上のリポジトリを効率的に管理**
+- ✅ **セキュリティの向上**
+- ✅ **運用コストの削減**
 
-## 🚀 **展開後の確認**
+### 監視システムの利点
+- ✅ **自動的な期限監視**
+- ✅ **段階的なアラート**
+- ✅ **複数の通知方法**
+- ✅ **詳細なログ記録**
 
-1. **テスト実行**
-   ```bash
-   # 監視ワークフローを手動実行
-   gh workflow run auto-token-refresh.yml -f force_check=true --repo YOUR_ORG/claude-code-action
-   ```
+## 🎯 **次のステップ**
 
-2. **各リポジトリでの動作確認**
-   - いくつかのリポジトリでPRを作成
-   - `@claude`コメントを投稿
-   - 正常に応答することを確認
+1. **Organization Secrets設定完了**
+2. **全リポジトリでのテスト実行**
+3. **定期監視の確認**
+4. **必要に応じてSlack/メール通知設定**
 
-3. **アラート機能の確認**
-   - Slack通知の設定（オプション）
-   - GitHub Issues機能の有効化（オプション）
+---
 
-これで、20以上のリポジトリでClaude Max認証を効率的に管理できるシステムが完成します！ 
+**更新日**: 2025年6月21日  
+**対象リポジトリ**: claude-code-action, claude-code-base-action, その他Claude関連リポジトリ  
+**監視システム**: 有効 
