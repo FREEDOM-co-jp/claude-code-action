@@ -105,16 +105,32 @@ jobs:
                 }
               },
               {
-                name: 'Proxy service approach 1',
-                url: 'https://cors-anywhere.herokuapp.com/https://claude.ai/api/auth/refresh',
+                name: 'Proxy service - AllOrigins direct',
+                url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent('https://claude.ai/api/auth/refresh'),
                 headers: {
                   'Content-Type': 'application/json',
-                  'X-Requested-With': 'XMLHttpRequest'
+                  'Origin': 'https://api.allorigins.win'
                 }
               },
               {
-                name: 'Proxy service approach 2',
-                url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent('https://claude.ai/api/auth/refresh'),
+                name: 'Proxy service - AllOrigins with callback',
+                url: 'https://api.allorigins.win/get?callback=?&url=' + encodeURIComponent('https://claude.ai/api/auth/refresh'),
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                isJsonp: true
+              },
+              {
+                name: 'Proxy service - CORS.sh',
+                url: 'https://cors.sh/https://claude.ai/api/auth/refresh',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-cors-api-key': 'temp_' + Math.random().toString(36).substring(7)
+                }
+              },
+              {
+                name: 'Proxy service - Proxy.cors.sh',
+                url: 'https://proxy.cors.sh/https://claude.ai/api/auth/refresh',
                 headers: {
                   'Content-Type': 'application/json'
                 }
@@ -153,19 +169,62 @@ jobs:
                 console.log(`   Headers: ${JSON.stringify(Object.fromEntries(response.headers.entries()))}`);
                 
                 if (response.status === 200) {
-                  const data = await response.json();
-                  console.log(`   Response keys: ${Object.keys(data)}`);
+                  const responseText = await response.text();
+                  console.log(`   Raw response: ${responseText.substring(0, 300)}${responseText.length > 300 ? '...' : ''}`);
                   
-                  if (data.access_token) {
-                    console.log(`✅ SUCCESS with ${approach.name}!`);
-                    return {
-                      success: true,
-                      data: data,
-                      approach: approach.name
-                    };
-                  } else {
-                    console.log(`❌ No access_token in response from ${approach.name}`);
-                    return { success: false, error: 'No access_token in response' };
+                  let data;
+                  try {
+                    // Handle JSONP responses
+                    if (approach.isJsonp && responseText.includes('callback')) {
+                      const jsonMatch = responseText.match(/\{.*\}/);
+                      if (jsonMatch) {
+                        const innerData = JSON.parse(jsonMatch[0]);
+                        if (innerData.contents) {
+                          data = JSON.parse(innerData.contents);
+                        } else {
+                          data = innerData;
+                        }
+                      } else {
+                        throw new Error('JSONP response not parseable');
+                      }
+                    } else {
+                      data = JSON.parse(responseText);
+                    }
+                    
+                    console.log(`   Response keys: ${Object.keys(data)}`);
+                    
+                    // Check for various possible response structures
+                    let accessToken = data.access_token || data.accessToken || data.token;
+                    let expiresIn = data.expires_in || data.expiresIn || data.expiry || 86400;
+                    
+                    // Check nested structures
+                    if (!accessToken && data.data) {
+                      accessToken = data.data.access_token || data.data.accessToken || data.data.token;
+                      expiresIn = data.data.expires_in || data.data.expiresIn || data.data.expiry || expiresIn;
+                    }
+                    
+                    // Check result field (common in proxy responses)
+                    if (!accessToken && data.result) {
+                      accessToken = data.result.access_token || data.result.accessToken || data.result.token;
+                      expiresIn = data.result.expires_in || data.result.expiresIn || data.result.expiry || expiresIn;
+                    }
+                    
+                    if (accessToken) {
+                      console.log(`✅ SUCCESS with ${approach.name}!`);
+                      return {
+                        success: true,
+                        data: { access_token: accessToken, expires_in: expiresIn },
+                        approach: approach.name
+                      };
+                    } else {
+                      console.log(`❌ No access_token in response from ${approach.name}`);
+                      console.log(`   Available fields: ${JSON.stringify(data, null, 2)}`);
+                      return { success: false, error: 'No access_token in response' };
+                    }
+                  } catch (parseError) {
+                    console.log(`❌ JSON parse error from ${approach.name}: ${parseError.message}`);
+                    console.log(`   Response was: ${responseText.substring(0, 500)}`);
+                    return { success: false, error: `JSON parse error: ${parseError.message}` };
                   }
                 } else {
                   const errorText = await response.text();
