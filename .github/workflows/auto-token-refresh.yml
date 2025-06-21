@@ -75,7 +75,6 @@ jobs:
           
       - name: Refresh OAuth token
         if: steps.check-refresh.outputs.should_refresh == 'true'
-        id: refresh
         uses: actions/github-script@v7
         with:
           script: |
@@ -105,35 +104,45 @@ jobs:
                 }
               },
               {
-                name: 'Proxy service - AllOrigins direct',
-                url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent('https://claude.ai/api/auth/refresh'),
+                name: 'Proxy service - CORS Anywhere',
+                url: 'https://cors-anywhere.herokuapp.com/https://claude.ai/api/auth/refresh',
                 headers: {
                   'Content-Type': 'application/json',
-                  'Origin': 'https://api.allorigins.win'
+                  'X-Requested-With': 'XMLHttpRequest',
+                  'Origin': 'https://cors-anywhere.herokuapp.com'
                 }
               },
               {
-                name: 'Proxy service - AllOrigins with callback',
-                url: 'https://api.allorigins.win/get?callback=?&url=' + encodeURIComponent('https://claude.ai/api/auth/refresh'),
+                name: 'Proxy service - ThingProxy',
+                url: 'https://thingproxy.freeboard.io/fetch/https://claude.ai/api/auth/refresh',
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+              },
+              {
+                name: 'Proxy service - Proxy.cors.sh (fixed)',
+                url: 'https://proxy.cors.sh/https://claude.ai/api/auth/refresh',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Requested-With': 'XMLHttpRequest',
+                  'Origin': 'https://proxy.cors.sh'
+                }
+              },
+              {
+                name: 'Proxy service - CorsProxy',
+                url: 'https://corsproxy.io/?https://claude.ai/api/auth/refresh',
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+              },
+              {
+                name: 'Proxy service - AllOrigins GET method',
+                url: 'https://api.allorigins.win/get?url=' + encodeURIComponent('https://claude.ai/api/auth/refresh'),
+                method: 'GET',
                 headers: {
                   'Content-Type': 'application/json'
                 },
-                isJsonp: true
-              },
-              {
-                name: 'Proxy service - CORS.sh',
-                url: 'https://cors.sh/https://claude.ai/api/auth/refresh',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-cors-api-key': 'temp_' + Math.random().toString(36).substring(7)
-                }
-              },
-              {
-                name: 'Proxy service - Proxy.cors.sh',
-                url: 'https://proxy.cors.sh/https://claude.ai/api/auth/refresh',
-                headers: {
-                  'Content-Type': 'application/json'
-                }
+                customBody: true
               },
               {
                 name: 'Alternative endpoint 1',
@@ -157,13 +166,26 @@ jobs:
               console.log(`🧪 Trying: ${approach.name}`);
               
               try {
-                const response = await fetch(approach.url, {
-                  method: 'POST',
-                  headers: approach.headers,
-                  body: JSON.stringify({
+                const requestOptions = {
+                  method: approach.method || 'POST',
+                  headers: approach.headers
+                };
+                
+                // Handle special cases for proxy services
+                if (approach.customBody) {
+                  // For GET requests that need to send POST data through proxy
+                  const targetUrl = `https://claude.ai/api/auth/refresh`;
+                  const postData = JSON.stringify({refresh_token: refreshToken});
+                  requestOptions.url = approach.url + '&method=POST&headers=' + 
+                    encodeURIComponent(JSON.stringify({'Content-Type': 'application/json'})) +
+                    '&body=' + encodeURIComponent(postData);
+                } else {
+                  requestOptions.body = JSON.stringify({
                     refresh_token: refreshToken
-                  })
-                });
+                  });
+                }
+                
+                const response = await fetch(approach.url, requestOptions);
                 
                 console.log(`   Status: ${response.status}`);
                 console.log(`   Headers: ${JSON.stringify(Object.fromEntries(response.headers.entries()))}`);
@@ -207,6 +229,17 @@ jobs:
                     if (!accessToken && data.result) {
                       accessToken = data.result.access_token || data.result.accessToken || data.result.token;
                       expiresIn = data.result.expires_in || data.result.expiresIn || data.result.expiry || expiresIn;
+                    }
+                    
+                    // Check contents field (AllOrigins response)
+                    if (!accessToken && data.contents) {
+                      try {
+                        const contentsData = typeof data.contents === 'string' ? JSON.parse(data.contents) : data.contents;
+                        accessToken = contentsData.access_token || contentsData.accessToken || contentsData.token;
+                        expiresIn = contentsData.expires_in || contentsData.expiresIn || contentsData.expiry || expiresIn;
+                      } catch (e) {
+                        console.log(`   Contents parsing failed: ${e.message}`);
+                      }
                     }
                     
                     if (accessToken) {
@@ -327,7 +360,7 @@ jobs:
               cloudflare_blocks: cloudflareBlocked,
               last_error: lastResult?.error,
               recommendation: cloudflareBlocked > 0 ? 
-                'Consider using a different proxy service or manual token refresh' :
+                'Consider using a different proxy service or manual token refresh' : 
                 'Check if Claude API endpoints have changed'
             };
             
