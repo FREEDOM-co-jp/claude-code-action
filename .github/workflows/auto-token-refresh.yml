@@ -43,18 +43,26 @@ jobs:
           const expiryTime = parseInt(expiresAt);
           const hoursLeft = Math.floor((expiryTime - now) / (1000 * 60 * 60));
           
+          console.log('=== Token Refresh Check ===');
           console.log('Current time:', new Date(now).toISOString());
           console.log('Token expires at:', new Date(expiryTime).toISOString());
+          console.log('Expiry timestamp:', expiryTime);
+          console.log('Current timestamp:', now);
           console.log('Hours until expiry:', hoursLeft);
-          console.log('Force refresh:', forceRefresh);
+          console.log('Force refresh input:', '${{ github.event.inputs.force_refresh }}');
+          console.log('Force refresh boolean:', forceRefresh);
+          console.log('Refresh threshold: 6 hours');
           
           if (hoursLeft <= 6 || forceRefresh) {
-            console.log('Token refresh needed');
+            console.log('✅ Token refresh IS needed');
+            console.log('Reason:', forceRefresh ? 'Force refresh requested' : 'Token expires within 6 hours');
             fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_refresh=true\n');
           } else {
-            console.log('Token refresh not needed');
+            console.log('❌ Token refresh NOT needed');
+            console.log('Token is still valid for', hoursLeft, 'hours');
             fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_refresh=false\n');
           }
+          console.log('=== End Token Refresh Check ===');
           "
           
       - name: Refresh OAuth token
